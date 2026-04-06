@@ -1,0 +1,81 @@
+{
+  "theme": "dark",
+  "archetype": "7 (Electric & Neon - Future, Speed, Disruption)",
+  "vibe": "Energetic, cutting-edge, magical, fast. A highly immersive tech tool aesthetic.",
+  "typography": {
+    "fonts": {
+      "heading": "Outfit",
+      "body": "JetBrains Mono",
+      "accent": "JetBrains Mono"
+    },
+    "rules": {
+      "headings": "Tight letter spacing (tracking-tight), never default to standard bold (use font-light or font-black). Maximum text size text-6xl. Do NOT use Inter.",
+      "body": "Loose line-height (leading-relaxed) for readability.",
+      "labels": "Uppercase, tiny, wide spacing (tracking-[0.2em])."
+    }
+  },
+  "colors": {
+    "base": "#05050A",
+    "primary": "#00E5FF",
+    "secondary": "#FF007F",
+    "accent": "#D9F854",
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA"
+    },
+    "surface": {
+      "glass": "bg-black/60 backdrop-blur-2xl border border-white/10",
+      "solid": "bg-[#0A0A0F] border border-white/5",
+      "accent_glow": "shadow-[0_0_15px_rgba(0,229,255,0.4)]"
+    }
+  },
+  "layout_spacing": {
+    "spacing_scale": "p-4, p-8, p-12, p-16, p-24, p-32",
+    "grid_strategy": "The Control Room Grid (For Code/Dashboard) & Bento Grid (For Marketing/Landing)",
+    "rules": [
+      "Generous spacing: use p-8 or p-12 instead of p-4 where possible.",
+      "Asymmetry in marketing sections, strict density in code generator dashboard.",
+      "Grid children must be direct children. Override default stretch with align-items: start.",
+      "Containers with borders must have internal padding (p-6 or p-8)."
+    ]
+  },
+  "components": {
+    "buttons": "Flat solid background with sharp inner contrast. Glow effect on hover. Transition transform and opacity.",
+    "inputs": "Glassmorphism style with 1px border. Focus state must have high contrast border.",
+    "cards": "Glassmorphism for floating elements (bg-black/40 backdrop-blur-xl border border-white/10). Solid flat cards for code display.",
+    "modals": "Use Shadcn Dialog, heavily customized with glassmorphism."
+  },
+  "motion": {
+    "rules": [
+      "Hover states for all interactive elements.",
+      "Entrance animations staggered for lists.",
+      "Smooth state changes.",
+      "Respect prefers-reduced-motion."
+    ]
+  },
+  "media": {
+    "images": [
+      {
+        "url": "https://images.pexels.com/photos/28583190/pexels-photo-28583190.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "category": "hero_background",
+        "description": "Creative abstract art featuring vibrant fluid lines and colors on a dark background. Use as a background layer with low opacity (bg-black/70 overlay) to create glowing 'The Kinetic Texture'."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1608742213509-815b97c30b36?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzOTB8MHwxfHNlYXJjaHwyfHxoYWNrZXIlMjBjb2RpbmclMjB0ZXJtaW5hbHxlbnwwfHx8fDE3NzU1MTU2NjN8MA&ixlib=rb-4.1.0&q=85",
+        "category": "feature_card_visual",
+        "description": "Black flat screen computer monitor. Use inside a feature bento card to represent code output."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build a vibrant dark mode landing page and code generation dashboard using React, Tailwind CSS, and Shadcn UI components.",
+    "Apply the '7 (Electric & Neon)' archetype with a base color of #05050A. Never use pure #000000. Use neon cyan (#00E5FF) and hot pink (#FF007F) for vibrant accents and gradients.",
+    "Use 'Outfit' for headings and 'JetBrains Mono' for body text and code blocks.",
+    "The Hero section should contain the file upload system (image + text) housed inside a glassmorphism bento card.",
+    "The 'Generated Code Display' and 'Interactive Demo Interface' should be presented in a control-room style grid using pure HTML/Tailwind for layout structure.",
+    "Incorporate the 'Project Proto Documentation' as a sleek side-panel or tabbed view using Shadcn Tabs.",
+    "All interactive elements (buttons, inputs, tabs) and key informational areas MUST include a data-testid attribute in kebab-case format.",
+    "Use lucide-react or @phosphor-icons/react for iconography.",
+    "Ensure high contrast on interactive states (hover/focus)."
+  ]
+}
