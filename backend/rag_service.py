@@ -1,29 +1,29 @@
 """
 RAG Training Service for Proto
-Uses ChromaDB for vector storage and pix2code dataset for training.
+Uses ChromaDB (in-memory) for vector storage and the real pix2code public dataset from HuggingFace.
+Dataset: N0zomu/pix2code-data (1748 samples)
 """
 
 import chromadb
 from chromadb.config import Settings
 import logging
-import os
+import json
 from pathlib import Path
-from dataset_generator import get_full_dataset
+from dataset_generator import load_public_dataset, get_dataset_info
 
 logger = logging.getLogger(__name__)
 
-CHROMA_DIR = str(Path(__file__).parent / "chroma_db")
 COLLECTION_NAME = "proto_ui_components"
 
 class RAGService:
     def __init__(self):
-        self.client = chromadb.PersistentClient(path=CHROMA_DIR)
+        self.client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
         self.collection = None
         self.is_trained = False
-        self.training_stats = {"total_samples": 0, "categories": {}, "frameworks": {}}
+        self.training_stats = {"total_samples": 0, "categories": {}}
+        self._dataset_cache = None
     
     def get_collection(self):
-        """Get or create the ChromaDB collection."""
         if self.collection is None:
             self.collection = self.client.get_or_create_collection(
                 name=COLLECTION_NAME,
@@ -32,72 +32,52 @@ class RAGService:
         return self.collection
     
     def train(self):
-        """Train the RAG system by loading the pix2code + curated dataset into ChromaDB."""
-        logger.info("Starting RAG training...")
+        """Train the RAG system by loading the real pix2code public dataset into ChromaDB."""
+        logger.info("Starting RAG training with pix2code public dataset...")
         
+        # Reset client for clean training
+        self.client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
+        self.collection = None
         collection = self.get_collection()
         
-        # Clear existing data for fresh training
-        existing = collection.count()
-        if existing > 0:
-            all_ids = collection.get()["ids"]
-            if all_ids:
-                collection.delete(ids=all_ids)
-            logger.info(f"Cleared {existing} existing entries")
+        # Load real public dataset
+        dataset = load_public_dataset()
+        self._dataset_cache = {item["id"]: item for item in dataset}
         
-        # Load dataset
-        dataset = get_full_dataset()
-        
-        # Prepare batch data
-        ids = []
-        documents = []
-        metadatas = []
-        
-        for item in dataset:
-            ids.append(item["id"])
-            
-            # The document is the description - this is what gets embedded and searched
-            documents.append(item["description"])
-            
-            # Metadata stores the actual code and other info
-            metadatas.append({
+        # Add to ChromaDB in batches - only store descriptions as documents
+        # Code is stored separately in _dataset_cache (avoids metadata size limits)
+        batch_size = 50
+        for i in range(0, len(dataset), batch_size):
+            batch = dataset[i:i+batch_size]
+            ids = [item["id"] for item in batch]
+            documents = [item["description"] for item in batch]
+            metadatas = [{
                 "category": item["category"],
-                "code": item["code"][:4000],  # ChromaDB metadata limit
-                "dsl": item.get("dsl", "")[:2000],
                 "framework": item["framework"],
-                "source": item["source"]
-            })
+                "source": item["source"],
+                "split": item["split"]
+            } for item in batch]
+            
+            collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            logger.info(f"Added batch {i//batch_size + 1}: {len(batch)} items (total: {collection.count()})")
         
-        # Add to ChromaDB in batches
-        batch_size = 20
-        for i in range(0, len(ids), batch_size):
-            batch_end = min(i + batch_size, len(ids))
-            collection.add(
-                ids=ids[i:batch_end],
-                documents=documents[i:batch_end],
-                metadatas=metadatas[i:batch_end]
-            )
-            logger.info(f"Added batch {i//batch_size + 1}: {batch_end - i} items")
-        
-        # Update stats
+        # Compute stats
         categories = {}
-        frameworks = {}
+        splits = {"train": 0, "test": 0}
         for item in dataset:
             cat = item["category"]
-            fw = item["framework"]
             categories[cat] = categories.get(cat, 0) + 1
-            frameworks[fw] = frameworks.get(fw, 0) + 1
+            splits[item["split"]] = splits.get(item["split"], 0) + 1
         
         self.training_stats = {
             "total_samples": len(dataset),
             "categories": categories,
-            "frameworks": frameworks,
-            "sources": {"pix2code": sum(1 for d in dataset if d["source"] == "pix2code"),
-                        "curated": sum(1 for d in dataset if d["source"] == "curated")}
+            "splits": splits,
+            "dataset": "pix2code (HuggingFace: N0zomu/pix2code-data)"
         }
         self.is_trained = True
         
-        logger.info(f"Training complete! {len(dataset)} samples loaded into ChromaDB")
+        logger.info(f"Training complete! {len(dataset)} real pix2code samples loaded")
         return self.training_stats
     
     def query(self, description: str, n_results: int = 5, framework: str = None):
@@ -107,43 +87,39 @@ class RAGService:
         if collection.count() == 0:
             return []
         
-        # Build query with optional framework filter
-        where_filter = None
-        if framework and framework != "HTML/CSS/JS":
-            where_filter = {"framework": framework}
-        
         try:
-            results = collection.query(
-                query_texts=[description],
-                n_results=min(n_results, collection.count()),
-                where=where_filter if where_filter else None
-            )
-        except Exception:
-            # If filter fails (no matching framework), query without filter
             results = collection.query(
                 query_texts=[description],
                 n_results=min(n_results, collection.count())
             )
+        except Exception as e:
+            logger.error(f"RAG query error: {e}")
+            return []
         
-        # Format results
         retrieved = []
         if results and results["ids"] and results["ids"][0]:
-            for i, id in enumerate(results["ids"][0]):
+            for i, doc_id in enumerate(results["ids"][0]):
                 metadata = results["metadatas"][0][i]
                 distance = results["distances"][0][i] if results.get("distances") else None
+                
+                # Get full code from cache
+                cached = self._dataset_cache.get(doc_id, {}) if self._dataset_cache else {}
+                
                 retrieved.append({
-                    "id": id,
+                    "id": doc_id,
                     "description": results["documents"][0][i],
                     "category": metadata.get("category", "unknown"),
-                    "code": metadata.get("code", ""),
+                    "code": cached.get("code", ""),
+                    "dsl": cached.get("dsl", ""),
                     "framework": metadata.get("framework", "unknown"),
+                    "source": metadata.get("source", "unknown"),
                     "similarity": round(1 - (distance or 0), 3)
                 })
         
         return retrieved
     
     def get_status(self):
-        """Get current training status and stats."""
+        """Get current training status."""
         collection = self.get_collection()
         count = collection.count()
         
@@ -151,7 +127,7 @@ class RAGService:
             "is_trained": count > 0,
             "total_entries": count,
             "stats": self.training_stats if self.is_trained else {},
-            "storage_path": CHROMA_DIR
+            "storage_path": "in-memory (ChromaDB EphemeralClient)"
         }
 
 # Singleton instance

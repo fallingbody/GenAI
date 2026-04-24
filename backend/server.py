@@ -1,9 +1,10 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import threading
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict
@@ -65,24 +66,42 @@ class RAGQueryRequest(BaseModel):
 async def root():
     return {"message": "Proto - AI Frontend Generator API with RAG Training Pipeline"}
 
-@api_router.post("/train")
-async def train_rag():
-    """Train the RAG system with pix2code + curated dataset."""
+# Training state
+training_state = {"is_training": False, "progress": "", "error": None}
+
+def run_training():
+    """Run training in background thread."""
+    global training_state
+    training_state = {"is_training": True, "progress": "Downloading pix2code dataset from HuggingFace...", "error": None}
     try:
         stats = rag_service.train()
-        return {
-            "status": "success",
-            "message": "RAG training completed successfully",
-            "stats": stats
-        }
+        training_state = {"is_training": False, "progress": "Complete", "error": None, "stats": stats}
     except Exception as e:
+        training_state = {"is_training": False, "progress": "Failed", "error": str(e)}
         logging.error(f"Training error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")
 
-@api_router.get("/training-status", response_model=TrainingStatus)
+@api_router.post("/train")
+async def train_rag():
+    """Start RAG training in background."""
+    global training_state
+    if training_state.get("is_training"):
+        return {"status": "already_training", "message": "Training is already in progress", "progress": training_state["progress"]}
+    
+    thread = threading.Thread(target=run_training, daemon=True)
+    thread.start()
+    
+    return {"status": "started", "message": "Training started in background. Poll /api/training-status for progress."}
+
+@api_router.get("/training-status")
 async def get_training_status():
     """Get current training status."""
-    return rag_service.get_status()
+    status = rag_service.get_status()
+    status["is_training"] = training_state.get("is_training", False)
+    status["training_progress"] = training_state.get("progress", "")
+    status["training_error"] = training_state.get("error")
+    if "stats" in training_state and training_state["stats"]:
+        status["stats"] = training_state["stats"]
+    return status
 
 @api_router.post("/rag-query")
 async def rag_query(request: RAGQueryRequest):
@@ -257,32 +276,10 @@ async def get_project(project_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.get("/dataset-info")
-async def get_dataset_info():
-    """Get information about the training dataset."""
-    from dataset_generator import get_full_dataset, MODERN_UI_TEMPLATES
-    
-    dataset = get_full_dataset()
-    categories = {}
-    frameworks = {}
-    sources = {}
-    
-    for item in dataset:
-        cat = item["category"]
-        fw = item["framework"]
-        src = item["source"]
-        categories[cat] = categories.get(cat, 0) + 1
-        frameworks[fw] = frameworks.get(fw, 0) + 1
-        sources[src] = sources.get(src, 0) + 1
-    
-    return {
-        "total_samples": len(dataset),
-        "categories": categories,
-        "frameworks": frameworks,
-        "sources": sources,
-        "dataset_name": "pix2code + Curated Modern UI Templates",
-        "description": "Based on the public pix2code dataset by Tony Beltramelli with extended modern React/Vue/Angular templates",
-        "reference": "https://github.com/tonybeltramelli/pix2code"
-    }
+async def get_dataset_info_endpoint():
+    """Get information about the public pix2code dataset."""
+    from dataset_generator import get_dataset_info
+    return get_dataset_info()
 
 app.include_router(api_router)
 

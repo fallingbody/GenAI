@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Database, Loader2, RefreshCw, CheckCircle, AlertCircle, BarChart3, Layers, GitBranch } from 'lucide-react';
+import { Database, Loader2, RefreshCw, CheckCircle, AlertCircle, BarChart3, Layers, GitBranch, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 
@@ -30,13 +30,33 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
   const handleTrain = async () => {
     setTraining(true);
     try {
-      const response = await axios.post(`${API}/train`, {}, { timeout: 60000 });
-      toast.success(`Training complete! ${response.data.stats.total_samples} samples loaded into vector DB`);
-      onTrainingComplete();
+      await axios.post(`${API}/train`, {}, { timeout: 10000 });
+      toast.info('Training started! Downloading pix2code dataset...');
+      
+      // Poll for completion
+      const pollInterval = setInterval(async () => {
+        try {
+          const res = await axios.get(`${API}/training-status`);
+          const status = res.data;
+          
+          if (!status.is_training && status.is_trained) {
+            clearInterval(pollInterval);
+            setTraining(false);
+            toast.success(`Training complete! ${status.total_entries} pix2code samples loaded`);
+            onTrainingComplete();
+          } else if (status.training_error) {
+            clearInterval(pollInterval);
+            setTraining(false);
+            toast.error(`Training failed: ${status.training_error}`);
+          }
+        } catch (err) {
+          // Ignore poll errors
+        }
+      }, 5000);
+      
     } catch (error) {
       console.error('Training error:', error);
       toast.error(error.response?.data?.detail || 'Training failed');
-    } finally {
       setTraining(false);
     }
   };
@@ -51,7 +71,7 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
               RAG Training Pipeline
             </h2>
             <p className="text-[#A1A1AA] text-sm" style={{ fontFamily: 'JetBrains Mono' }}>
-              Train the vector database with pix2code + curated UI templates for enhanced code generation
+              Train on the public <span className="text-[#00E5FF]">pix2code</span> dataset (1748 real UI-to-code pairs) from HuggingFace
             </p>
           </div>
           <div className={`px-4 py-2 rounded-full border flex items-center gap-2 ${
@@ -69,12 +89,12 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
           </div>
         </div>
 
-        {/* Pipeline Workflow Visual */}
+        {/* Pipeline Workflow */}
         <div className="grid grid-cols-4 gap-4 mb-8">
           {[
-            { step: '1', label: 'Load Dataset', desc: 'pix2code + curated', icon: Database, done: !!datasetInfo },
-            { step: '2', label: 'Process Data', desc: 'Extract descriptions', icon: Layers, done: !!datasetInfo },
-            { step: '3', label: 'Create Embeddings', desc: 'Vector embeddings', icon: GitBranch, done: trainingStatus?.is_trained },
+            { step: '1', label: 'Fetch Dataset', desc: 'HuggingFace pix2code', icon: Database, done: !!datasetInfo },
+            { step: '2', label: 'Parse DSL + HTML', desc: '1748 real pairs', icon: Layers, done: !!datasetInfo },
+            { step: '3', label: 'Create Embeddings', desc: 'Text embeddings', icon: GitBranch, done: trainingStatus?.is_trained },
             { step: '4', label: 'Store in ChromaDB', desc: 'Vector database', icon: BarChart3, done: trainingStatus?.is_trained }
           ].map((item, i) => (
             <div key={i} className={`p-4 rounded-xl border transition-all ${
@@ -104,7 +124,7 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
           {training ? (
             <>
               <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-              Training RAG Model...
+              Downloading & Training on pix2code dataset...
             </>
           ) : trainingStatus?.is_trained ? (
             <>
@@ -114,18 +134,18 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
           ) : (
             <>
               <Database className="w-5 h-5 mr-2" />
-              Start Training
+              Start Training on pix2code
             </>
           )}
         </Button>
       </div>
 
-      {/* Dataset Info */}
+      {/* Dataset Info + Vector DB */}
       <div className="grid md:grid-cols-2 gap-6">
-        {/* Dataset Source */}
+        {/* Public Dataset Source */}
         <div className="bg-black/60 backdrop-blur-2xl border border-white/10 rounded-2xl p-8">
           <h3 className="text-xl font-light text-white mb-4" style={{ fontFamily: 'Outfit' }}>
-            Dataset Source
+            Public Dataset
           </h3>
           
           {loadingInfo ? (
@@ -138,37 +158,43 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
                 <p className="text-sm text-[#00E5FF] font-medium" style={{ fontFamily: 'JetBrains Mono' }}>
                   {datasetInfo.dataset_name}
                 </p>
-                <p className="text-xs text-[#A1A1AA] mt-1">{datasetInfo.description}</p>
-                <a 
-                  href={datasetInfo.reference} 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="text-xs text-[#FF007F] mt-2 inline-block hover:underline"
-                >
-                  {datasetInfo.reference}
-                </a>
-              </div>
-              
-              <div className="grid grid-cols-2 gap-3">
-                <div className="p-3 bg-black/40 border border-white/5 rounded-lg text-center">
-                  <p className="text-2xl font-light text-[#00E5FF]">{datasetInfo.total_samples}</p>
-                  <p className="text-xs text-[#A1A1AA] uppercase tracking-wider mt-1">Total Samples</p>
-                </div>
-                <div className="p-3 bg-black/40 border border-white/5 rounded-lg text-center">
-                  <p className="text-2xl font-light text-[#FF007F]">{Object.keys(datasetInfo.categories).length}</p>
-                  <p className="text-xs text-[#A1A1AA] uppercase tracking-wider mt-1">Categories</p>
-                </div>
+                <p className="text-xs text-[#A1A1AA] mt-2 leading-relaxed">{datasetInfo.description}</p>
               </div>
 
-              {/* Sources Breakdown */}
+              {/* Links */}
               <div className="space-y-2">
-                <p className="text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Sources</p>
-                {Object.entries(datasetInfo.sources).map(([source, count]) => (
-                  <div key={source} className="flex items-center justify-between p-2 bg-black/20 rounded-lg">
-                    <span className="text-sm text-white capitalize">{source}</span>
-                    <span className="text-sm text-[#00E5FF]" style={{ fontFamily: 'JetBrains Mono' }}>{count} samples</span>
-                  </div>
+                {[
+                  { label: 'HuggingFace', url: datasetInfo.reference_huggingface },
+                  { label: 'GitHub', url: datasetInfo.reference_github },
+                  { label: 'Paper', url: datasetInfo.reference_paper }
+                ].map((link) => (
+                  <a 
+                    key={link.label}
+                    href={link.url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between p-3 bg-black/20 rounded-lg hover:bg-black/40 transition-all group"
+                  >
+                    <span className="text-sm text-[#A1A1AA] group-hover:text-white">{link.label}</span>
+                    <ExternalLink className="w-3 h-3 text-[#FF007F]" />
+                  </a>
                 ))}
+              </div>
+              
+              {/* Stats */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-3 bg-black/40 border border-white/5 rounded-lg text-center">
+                  <p className="text-2xl font-light text-[#00E5FF]">{datasetInfo.total_train}</p>
+                  <p className="text-[10px] text-[#A1A1AA] uppercase tracking-wider mt-1">Train</p>
+                </div>
+                <div className="p-3 bg-black/40 border border-white/5 rounded-lg text-center">
+                  <p className="text-2xl font-light text-[#FF007F]">{datasetInfo.total_test}</p>
+                  <p className="text-[10px] text-[#A1A1AA] uppercase tracking-wider mt-1">Test</p>
+                </div>
+                <div className="p-3 bg-black/40 border border-white/5 rounded-lg text-center">
+                  <p className="text-2xl font-light text-[#D9F854]">{datasetInfo.total_samples}</p>
+                  <p className="text-[10px] text-[#A1A1AA] uppercase tracking-wider mt-1">Total</p>
+                </div>
               </div>
             </div>
           ) : (
@@ -176,7 +202,7 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
           )}
         </div>
 
-        {/* Training Stats */}
+        {/* Vector Database */}
         <div className="bg-black/60 backdrop-blur-2xl border border-white/10 rounded-2xl p-8">
           <h3 className="text-xl font-light text-white mb-4" style={{ fontFamily: 'Outfit' }}>
             Vector Database
@@ -189,36 +215,39 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
                   ChromaDB Active
                 </p>
                 <p className="text-xs text-[#A1A1AA] mt-1">
-                  {trainingStatus.total_entries} vectors stored with cosine similarity indexing
+                  {trainingStatus.total_entries} vectors indexed with cosine similarity
                 </p>
               </div>
               
+              {/* Workflow */}
               <div className="p-3 bg-black/40 border border-white/5 rounded-lg">
-                <p className="text-xs uppercase tracking-[0.2em] text-[#A1A1AA] mb-3">How It Works</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-[#A1A1AA] mb-3">RAG Generation Flow</p>
                 <div className="space-y-2">
                   {[
                     'Upload UI sketch image',
-                    'AI analyzes design components',
-                    'RAG retrieves similar examples',
-                    'Generates code with context'
+                    'Gemini analyzes design components',
+                    'Query ChromaDB for similar pix2code layouts',
+                    'Retrieve top matching HTML patterns',
+                    'Generate final code with RAG context'
                   ].map((step, i) => (
                     <div key={i} className="flex items-center gap-2">
-                      <span className="w-5 h-5 rounded-full bg-[#00E5FF]/10 flex items-center justify-center text-[10px] text-[#00E5FF]">{i + 1}</span>
-                      <span className="text-sm text-[#A1A1AA]">{step}</span>
+                      <span className="w-5 h-5 rounded-full bg-[#00E5FF]/10 flex items-center justify-center text-[10px] text-[#00E5FF] shrink-0">{i + 1}</span>
+                      <span className="text-xs text-[#A1A1AA]">{step}</span>
                     </div>
                   ))}
                 </div>
               </div>
 
-              {/* Categories in DB */}
+              {/* Categories */}
               {trainingStatus.stats?.categories && (
                 <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Categories</p>
-                  <div className="flex flex-wrap gap-2">
-                    {Object.keys(trainingStatus.stats.categories).slice(0, 10).map((cat) => (
-                      <span key={cat} className="px-3 py-1 bg-black/40 border border-white/5 rounded-full text-xs text-[#00E5FF]">
-                        {cat}
-                      </span>
+                  <p className="text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Layout Categories</p>
+                  <div className="space-y-1">
+                    {Object.entries(trainingStatus.stats.categories).map(([cat, count]) => (
+                      <div key={cat} className="flex items-center justify-between p-2 bg-black/20 rounded-lg">
+                        <span className="text-xs text-white">{cat.replace(/_/g, ' ')}</span>
+                        <span className="text-xs text-[#00E5FF]" style={{ fontFamily: 'JetBrains Mono' }}>{count}</span>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -231,7 +260,7 @@ const TrainingPanel = ({ trainingStatus, onTrainingComplete }) => {
                 Vector DB empty
               </p>
               <p className="text-xs text-[#A1A1AA]">
-                Click "Start Training" to populate the vector database with UI patterns
+                Click "Start Training on pix2code" to download and index the public dataset
               </p>
             </div>
           )}
