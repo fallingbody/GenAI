@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,67 +6,284 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from typing import List, Optional, Dict
 import uuid
 from datetime import datetime, timezone
-
+from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+from rag_service import rag_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
+# --- Models ---
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+class GenerateCodeRequest(BaseModel):
+    image_base64: str
+    project_name: str
+    description: str
+    framework: Optional[str] = "React"
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+class GeneratedCodeResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    project_name: str
+    description: str
+    framework: str
+    generated_code: str
+    rag_context: Optional[List[Dict]] = []
+    timestamp: datetime
 
-# Add your routes to the router instead of directly to app
+class ProjectHistory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    project_name: str
+    description: str
+    framework: str
+    timestamp: datetime
+
+class TrainingStatus(BaseModel):
+    is_trained: bool
+    total_entries: int
+    stats: Dict
+    storage_path: str
+
+class RAGQueryRequest(BaseModel):
+    query: str
+    n_results: Optional[int] = 5
+    framework: Optional[str] = None
+
+# --- Routes ---
+
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "Proto - AI Frontend Generator API with RAG Training Pipeline"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+@api_router.post("/train")
+async def train_rag():
+    """Train the RAG system with pix2code + curated dataset."""
+    try:
+        stats = rag_service.train()
+        return {
+            "status": "success",
+            "message": "RAG training completed successfully",
+            "stats": stats
+        }
+    except Exception as e:
+        logging.error(f"Training error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+@api_router.get("/training-status", response_model=TrainingStatus)
+async def get_training_status():
+    """Get current training status."""
+    return rag_service.get_status()
 
-# Include the router in the main app
+@api_router.post("/rag-query")
+async def rag_query(request: RAGQueryRequest):
+    """Query the RAG system directly."""
+    status = rag_service.get_status()
+    if not status["is_trained"] and status["total_entries"] == 0:
+        raise HTTPException(status_code=400, detail="RAG system not trained yet. Call /api/train first.")
+    
+    results = rag_service.query(request.query, request.n_results, request.framework)
+    return {"results": results, "query": request.query}
+
+@api_router.post("/generate", response_model=GeneratedCodeResponse)
+async def generate_code(request: GenerateCodeRequest):
+    """Generate code using RAG-enhanced AI pipeline."""
+    try:
+        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        if not api_key:
+            raise HTTPException(status_code=500, detail="API key not configured")
+        
+        # Step 1: Analyze image with Gemini to get UI description
+        session_id = str(uuid.uuid4())
+        
+        analyzer = LlmChat(
+            api_key=api_key,
+            session_id=f"analyze-{session_id}",
+            system_message="You are a UI analysis expert. Describe the UI elements, layout structure, and design patterns you see in the image. Be specific about component types (forms, cards, navigation, etc), layout (grid, flex, columns), and visual hierarchy."
+        )
+        analyzer.with_model("gemini", "gemini-3-flash-preview")
+        
+        image_content = ImageContent(image_base64=request.image_base64)
+        
+        analysis_message = UserMessage(
+            text="Analyze this UI design/sketch. Describe the layout, components, and structure in detail.",
+            file_contents=[image_content]
+        )
+        
+        image_analysis = await analyzer.send_message(analysis_message)
+        logging.info(f"Image analysis complete: {image_analysis[:200]}...")
+        
+        # Step 2: Query RAG for similar UI examples
+        rag_results = []
+        rag_context_str = ""
+        status = rag_service.get_status()
+        
+        if status["total_entries"] > 0:
+            combined_query = f"{request.description}. {image_analysis[:500]}"
+            rag_results = rag_service.query(
+                combined_query, 
+                n_results=3,
+                framework=request.framework
+            )
+            
+            if rag_results:
+                rag_context_str = "\n\n--- REFERENCE EXAMPLES FROM TRAINING DATA ---\n"
+                for i, result in enumerate(rag_results):
+                    rag_context_str += f"\n### Example {i+1} (Category: {result['category']}, Similarity: {result['similarity']}):\n"
+                    rag_context_str += f"Description: {result['description']}\n"
+                    rag_context_str += f"Code:\n```\n{result['code'][:1500]}\n```\n"
+                
+                logging.info(f"RAG retrieved {len(rag_results)} similar examples")
+        
+        # Step 3: Generate code with RAG context
+        generator = LlmChat(
+            api_key=api_key,
+            session_id=f"generate-{session_id}",
+            system_message="""You are an expert frontend developer. Generate complete, production-ready frontend code.
+Use the reference examples from the training dataset as inspiration for structure and patterns.
+Adapt them to match the specific requirements and the uploaded design."""
+        )
+        generator.with_model("gemini", "gemini-3-flash-preview")
+        
+        generation_prompt = f"""Based on this UI analysis and user requirements, generate complete frontend code.
+
+## Image Analysis:
+{image_analysis}
+
+## User Requirements:
+- Project: {request.project_name}
+- Framework: {request.framework}
+- Description: {request.description}
+
+{rag_context_str}
+
+## Instructions:
+1. Use the reference examples above as structural patterns to follow
+2. Adapt the design to match the uploaded UI sketch
+3. Generate clean, production-ready {request.framework} code
+4. Include all necessary imports and components
+5. Use Tailwind CSS for styling
+6. Make it responsive
+
+Return ONLY the complete code, no explanations."""
+
+        gen_message = UserMessage(
+            text=generation_prompt,
+            file_contents=[image_content]
+        )
+        
+        generated_code = await generator.send_message(gen_message)
+        
+        # Step 4: Store in MongoDB
+        project_id = str(uuid.uuid4())
+        timestamp = datetime.now(timezone.utc)
+        
+        rag_context_for_db = [
+            {"id": r["id"], "category": r["category"], "similarity": r["similarity"]}
+            for r in rag_results
+        ]
+        
+        doc = {
+            "id": project_id,
+            "project_name": request.project_name,
+            "description": request.description,
+            "framework": request.framework,
+            "generated_code": generated_code,
+            "image_analysis": image_analysis,
+            "rag_context": rag_context_for_db,
+            "timestamp": timestamp.isoformat()
+        }
+        
+        await db.generated_projects.insert_one(doc)
+        
+        return GeneratedCodeResponse(
+            id=project_id,
+            project_name=request.project_name,
+            description=request.description,
+            framework=request.framework,
+            generated_code=generated_code,
+            rag_context=rag_context_for_db,
+            timestamp=timestamp
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error generating code: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate code: {str(e)}")
+
+@api_router.get("/projects", response_model=List[ProjectHistory])
+async def get_projects():
+    try:
+        projects = await db.generated_projects.find(
+            {}, 
+            {"_id": 0, "id": 1, "project_name": 1, "description": 1, "framework": 1, "timestamp": 1}
+        ).sort("timestamp", -1).limit(20).to_list(20)
+        
+        for project in projects:
+            if isinstance(project['timestamp'], str):
+                project['timestamp'] = datetime.fromisoformat(project['timestamp'])
+        
+        return projects
+    except Exception as e:
+        logging.error(f"Error fetching projects: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/projects/{project_id}")
+async def get_project(project_id: str):
+    try:
+        project = await db.generated_projects.find_one({"id": project_id}, {"_id": 0})
+        
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        if isinstance(project['timestamp'], str):
+            project['timestamp'] = datetime.fromisoformat(project['timestamp'])
+        
+        return project
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error fetching project: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/dataset-info")
+async def get_dataset_info():
+    """Get information about the training dataset."""
+    from dataset_generator import get_full_dataset, MODERN_UI_TEMPLATES
+    
+    dataset = get_full_dataset()
+    categories = {}
+    frameworks = {}
+    sources = {}
+    
+    for item in dataset:
+        cat = item["category"]
+        fw = item["framework"]
+        src = item["source"]
+        categories[cat] = categories.get(cat, 0) + 1
+        frameworks[fw] = frameworks.get(fw, 0) + 1
+        sources[src] = sources.get(src, 0) + 1
+    
+    return {
+        "total_samples": len(dataset),
+        "categories": categories,
+        "frameworks": frameworks,
+        "sources": sources,
+        "dataset_name": "pix2code + Curated Modern UI Templates",
+        "description": "Based on the public pix2code dataset by Tony Beltramelli with extended modern React/Vue/Angular templates",
+        "reference": "https://github.com/tonybeltramelli/pix2code"
+    }
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -77,7 +294,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
