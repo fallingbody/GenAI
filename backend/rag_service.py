@@ -35,7 +35,6 @@ class RAGService:
         """Train the RAG system by loading the real pix2code public dataset into ChromaDB."""
         logger.info("Starting RAG training with pix2code public dataset...")
         
-        # Reset client for clean training
         self.client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
         self.collection = None
         collection = self.get_collection()
@@ -44,8 +43,6 @@ class RAGService:
         dataset = load_public_dataset()
         self._dataset_cache = {item["id"]: item for item in dataset}
         
-        # Add to ChromaDB in batches - only store descriptions as documents
-        # Code is stored separately in _dataset_cache (avoids metadata size limits)
         batch_size = 50
         for i in range(0, len(dataset), batch_size):
             batch = dataset[i:i+batch_size]

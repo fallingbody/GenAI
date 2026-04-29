@@ -16,7 +16,6 @@ DATASET_NAME = "N0zomu/pix2code-data"
 DATASET_REF = "https://huggingface.co/datasets/N0zomu/pix2code-data"
 ORIGINAL_REF = "https://github.com/tonybeltramelli/pix2code"
 
-# DSL token to human-readable description mapping
 DSL_DESCRIPTIONS = {
     "header": "navigation header bar",
     "btn-active": "active navigation button",
@@ -43,10 +42,8 @@ def parse_pix2code_sample(content: str):
     
     for i, part in enumerate(parts):
         stripped = part.strip()
-        # DSL is the user/prompter input
         if stripped.startswith('header') or stripped.startswith('row'):
             dsl_code = stripped.rstrip('<|assistant')
-        # HTML is the assistant output
         if stripped.startswith('<html>') or stripped.startswith(' <html>'):
             html_code = stripped.rstrip('<|')
     

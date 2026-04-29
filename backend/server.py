@@ -10,7 +10,11 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict
 import uuid
 from datetime import datetime, timezone
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+from fastapi.responses import StreamingResponse
+import json
+import base64
+from google import genai
+from google.genai import types
 from rag_service import rag_service
 
 ROOT_DIR = Path(__file__).parent
@@ -113,67 +117,64 @@ async def rag_query(request: RAGQueryRequest):
     results = rag_service.query(request.query, request.n_results, request.framework)
     return {"results": results, "query": request.query}
 
-@api_router.post("/generate", response_model=GeneratedCodeResponse)
+
+@api_router.post("/generate")
 async def generate_code(request: GenerateCodeRequest):
-    """Generate code using RAG-enhanced AI pipeline."""
-    try:
-        api_key = os.environ.get('EMERGENT_LLM_KEY')
-        if not api_key:
-            raise HTTPException(status_code=500, detail="API key not configured")
-        
-        # Step 1: Analyze image with Gemini to get UI description
-        session_id = str(uuid.uuid4())
-        
-        analyzer = LlmChat(
-            api_key=api_key,
-            session_id=f"analyze-{session_id}",
-            system_message="You are a UI analysis expert. Describe the UI elements, layout structure, and design patterns you see in the image. Be specific about component types (forms, cards, navigation, etc), layout (grid, flex, columns), and visual hierarchy."
-        )
-        analyzer.with_model("gemini", "gemini-3-flash-preview")
-        
-        image_content = ImageContent(image_base64=request.image_base64)
-        
-        analysis_message = UserMessage(
-            text="Analyze this UI design/sketch. Describe the layout, components, and structure in detail.",
-            file_contents=[image_content]
-        )
-        
-        image_analysis = await analyzer.send_message(analysis_message)
-        logging.info(f"Image analysis complete: {image_analysis[:200]}...")
-        
-        # Step 2: Query RAG for similar UI examples
-        rag_results = []
-        rag_context_str = ""
-        status = rag_service.get_status()
-        
-        if status["total_entries"] > 0:
-            combined_query = f"{request.description}. {image_analysis[:500]}"
-            rag_results = rag_service.query(
-                combined_query, 
-                n_results=3,
-                framework=request.framework
-            )
+    """Generate code using RAG-enhanced AI pipeline and stream the result."""
+    api_key = os.environ.get('EMERGENT_LLM_KEY') or os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        raise HTTPException(status_code=500, detail="API key not configured")
+
+    genai_client = genai.Client(api_key=api_key)
+
+    async def event_generator():
+        try:
+            # Step 1: Analyze image with Gemini
+            session_id = str(uuid.uuid4())
+            yield f"data: {json.dumps({'status': 'analyzing', 'message': 'Analyzing UI design...'})}\n\n"
+
+            image_bytes = base64.b64decode(request.image_base64)
+            image_part = types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+
+            analysis_prompt = "You are a UI analysis expert. Describe the UI elements, layout structure, and design patterns you see in the image. Be specific about component types (forms, cards, navigation, etc), layout (grid, flex, columns), and visual hierarchy. Analyze this UI design/sketch. Describe the layout, components, and structure in detail."
             
-            if rag_results:
-                rag_context_str = "\n\n--- REFERENCE EXAMPLES FROM TRAINING DATA ---\n"
-                for i, result in enumerate(rag_results):
-                    rag_context_str += f"\n### Example {i+1} (Category: {result['category']}, Similarity: {result['similarity']}):\n"
-                    rag_context_str += f"Description: {result['description']}\n"
-                    rag_context_str += f"Code:\n```\n{result['code'][:1500]}\n```\n"
+            analysis_response = await genai_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[analysis_prompt, image_part]
+            )
+            image_analysis = analysis_response.text
+            logging.info(f"Image analysis complete: {image_analysis[:200]}...")
+
+            # Step 2: Query RAG for similar UI examples
+            yield f"data: {json.dumps({'status': 'rag', 'message': 'Retrieving reference examples...'})}\n\n"
+            rag_results = []
+            rag_context_str = ""
+            status = rag_service.get_status()
+            
+            if status["total_entries"] > 0:
+                combined_query = f"{request.description}. {image_analysis[:500]}"
+                rag_results = rag_service.query(
+                    combined_query, 
+                    n_results=3,
+                    framework=request.framework
+                )
                 
-                logging.info(f"RAG retrieved {len(rag_results)} similar examples")
-        
-        # Step 3: Generate code with RAG context
-        generator = LlmChat(
-            api_key=api_key,
-            session_id=f"generate-{session_id}",
-            system_message="""You are an expert frontend developer. Generate complete, production-ready frontend code.
+                if rag_results:
+                    rag_context_str = "\n\n--- REFERENCE EXAMPLES FROM TRAINING DATA ---\n"
+                    for i, result in enumerate(rag_results):
+                        rag_context_str += f"\n### Example {i+1} (Category: {result['category']}, Similarity: {result['similarity']}):\n"
+                        rag_context_str += f"Description: {result['description']}\n"
+                        rag_context_str += f"Code:\n```\n{result['code'][:1500]}\n```\n"
+                    
+                    logging.info(f"RAG retrieved {len(rag_results)} similar examples")
+            
+            # Step 3: Generate code with RAG context
+            yield f"data: {json.dumps({'status': 'generating', 'message': 'Generating code with RAG context...', 'rag_context': rag_results})}\n\n"
+            
+            generation_prompt = f"""You are an expert frontend developer. Generate complete, production-ready frontend code.
 Use the reference examples from the training dataset as inspiration for structure and patterns.
-Adapt them to match the specific requirements and the uploaded design."""
-        )
-        generator.with_model("gemini", "gemini-3-flash-preview")
-        
-        generation_prompt = f"""Based on this UI analysis and user requirements, generate complete frontend code.
+Adapt them to match the specific requirements and the uploaded design.
+Based on this UI analysis and user requirements, generate complete frontend code.
 
 ## Image Analysis:
 {image_analysis}
@@ -195,50 +196,56 @@ Adapt them to match the specific requirements and the uploaded design."""
 
 Return ONLY the complete code, no explanations."""
 
-        gen_message = UserMessage(
-            text=generation_prompt,
-            file_contents=[image_content]
-        )
-        
-        generated_code = await generator.send_message(gen_message)
-        
-        # Step 4: Store in MongoDB
-        project_id = str(uuid.uuid4())
-        timestamp = datetime.now(timezone.utc)
-        
-        rag_context_for_db = [
-            {"id": r["id"], "category": r["category"], "similarity": r["similarity"]}
-            for r in rag_results
-        ]
-        
-        doc = {
-            "id": project_id,
-            "project_name": request.project_name,
-            "description": request.description,
-            "framework": request.framework,
-            "generated_code": generated_code,
-            "image_analysis": image_analysis,
-            "rag_context": rag_context_for_db,
-            "timestamp": timestamp.isoformat()
-        }
-        
-        await db.generated_projects.insert_one(doc)
-        
-        return GeneratedCodeResponse(
-            id=project_id,
-            project_name=request.project_name,
-            description=request.description,
-            framework=request.framework,
-            generated_code=generated_code,
-            rag_context=rag_context_for_db,
-            timestamp=timestamp
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"Error generating code: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate code: {str(e)}")
+            response_stream = await genai_client.aio.models.generate_content_stream(
+                model='gemini-2.5-flash',
+                contents=[generation_prompt, image_part]
+            )
+            
+            generated_code = ""
+            async for chunk in response_stream:
+                generated_code += chunk.text
+                yield f"data: {json.dumps({'status': 'chunk', 'text': chunk.text})}\n\n"
+            
+            # Step 4: Store in MongoDB
+            yield f"data: {json.dumps({'status': 'saving', 'message': 'Saving project...'})}\n\n"
+            project_id = str(uuid.uuid4())
+            timestamp = datetime.now(timezone.utc)
+            
+            rag_context_for_db = [
+                {"id": r["id"], "category": r["category"], "similarity": r["similarity"]}
+                for r in rag_results
+            ]
+            
+            doc = {
+                "id": project_id,
+                "project_name": request.project_name,
+                "description": request.description,
+                "framework": request.framework,
+                "generated_code": generated_code,
+                "image_analysis": image_analysis,
+                "rag_context": rag_context_for_db,
+                "timestamp": timestamp.isoformat()
+            }
+            
+            await db.generated_projects.insert_one(doc)
+            
+            final_response = {
+                "id": project_id,
+                "project_name": request.project_name,
+                "description": request.description,
+                "framework": request.framework,
+                "generated_code": generated_code,
+                "rag_context": rag_context_for_db,
+                "timestamp": timestamp.isoformat()
+            }
+            yield f"data: {json.dumps({'status': 'done', 'project': final_response})}\n\n"
+            
+        except Exception as e:
+            logging.error(f"Error generating code: {str(e)}")
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @api_router.get("/projects", response_model=List[ProjectHistory])
 async def get_projects():

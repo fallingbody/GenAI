@@ -66,32 +66,84 @@ const HomePage = () => {
     }
 
     setLoading(true);
+    let toastId = toast.loading('Initializing generation process...');
+    
     try {
       const reader = new FileReader();
       reader.onloadend = async () => {
         try {
           const base64String = reader.result.split(',')[1];
-          const response = await axios.post(`${API}/generate`, {
-            image_base64: base64String,
-            project_name: projectName,
-            description: description,
-            framework: framework
-          }, { timeout: 120000 });
+          const response = await fetch(`${API}/generate`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              image_base64: base64String,
+              project_name: projectName,
+              description: description,
+              framework: framework
+            }),
+          });
 
-          setGeneratedCode(response.data);
-          setRagContext(response.data.rag_context || []);
-          toast.success('Code generated with RAG-enhanced AI!');
-          setActiveTab('code');
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to connect to generator');
+          }
+
+          const streamReader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let done = false;
+          let generatedCodeText = '';
+
+          setActiveTab('code'); // Switch early to show streaming
+
+          while (!done) {
+            const { value, done: readerDone } = await streamReader.read();
+            done = readerDone;
+            if (value) {
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split('\n\n');
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    
+                    if (data.status === 'analyzing' || data.status === 'rag' || data.status === 'generating') {
+                      toast.loading(data.message, { id: toastId });
+                    } else if (data.status === 'chunk') {
+                      generatedCodeText += data.text;
+                      setGeneratedCode({
+                        project_name: projectName,
+                        framework: framework,
+                        generated_code: generatedCodeText
+                      });
+                    } else if (data.status === 'done') {
+                      setGeneratedCode(data.project);
+                      setRagContext(data.project.rag_context || []);
+                      toast.success('Code generated with RAG-enhanced AI!', { id: toastId });
+                      setLoading(false);
+                    } else if (data.status === 'error') {
+                      toast.error(data.message, { id: toastId });
+                      setLoading(false);
+                    }
+                  } catch (e) {
+                    console.error('Error parsing stream data:', e, line);
+                  }
+                }
+              }
+            }
+          }
         } catch (error) {
           console.error('Error generating code:', error);
-          toast.error(error.response?.data?.detail || 'Failed to generate code');
-        } finally {
+          toast.error(error.message || 'Failed to generate code', { id: toastId });
           setLoading(false);
         }
       };
       reader.readAsDataURL(selectedImage);
     } catch (error) {
       console.error('Error:', error);
+      toast.error('An unexpected error occurred', { id: toastId });
       setLoading(false);
     }
   };
